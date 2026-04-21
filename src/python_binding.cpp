@@ -66,9 +66,8 @@ CompiledModel compile(nb::object ir) {
 
     LinkedList list = parseJSON(inputIR);
 
-    FusionPass fusion;
-    int fused = fusion.globalApply(&list);
-    std::cout << "FusionPass: " << fused << " fusion(s)\n";
+    PassManager pm(&list, {new FusionPass(), new ShapeInferencePass()});
+    pm.runGlobal();
 
     return CompiledModel{std::move(list)};
 }

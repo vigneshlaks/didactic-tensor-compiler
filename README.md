@@ -89,6 +89,17 @@ The build system auto-detects the available backend:
 | CUDA    | NVIDIA GPU + CUDA toolkit| `find_package(CUDA)`  |
 | Metal   | Apple Silicon / macOS    | `APPLE` + metal-cpp   |
 
+### Metal shader compilation
+
+Metal kernels live in `src/shaders.metal`. The build system supports two loading strategies depending on what tools are installed:
+
+| Strategy | Requirement | How it works |
+|---|---|---|
+| Build-time | Full Xcode app | `xcrun metal` compiles `.metal` → `.metallib` during `cmake --build`. Errors surface at build time. |
+| Runtime fallback | Xcode Command Line Tools only | `shaders.metal` is read from disk and compiled by the GPU driver on first run. |
+
+CMake detects which strategy to use automatically — no manual configuration needed. Install Xcode from the App Store to get the build-time path.
+
 ## Building
 
 **Dependencies**
@@ -97,6 +108,7 @@ The build system auto-detects the available backend:
 - [nlohmann/json](https://github.com/nlohmann/json)
 - *(optional)* CUDA toolkit for GPU support
 - *(optional)* [metal-cpp](https://developer.apple.com/metal/cpp/) under `metal-cpp/` for Apple Metal
+- *(optional)* Xcode (full app) for build-time Metal shader compilation — Command Line Tools alone use the runtime fallback
 
 ```bash
 cmake -B build
@@ -137,7 +149,8 @@ didactic-tensor-compiler/
 │   ├── passes.cpp      # Pass implementations
 │   ├── optimizers.cpp  # Training loop, SGD
 │   ├── gpu_exec.cu     # CUDA kernels
-│   └── metal_exec.cpp  # Metal kernels (metal-cpp)
+│   ├── metal_exec.cpp  # Metal dispatch (metal-cpp)
+│   └── shaders.metal   # MSL kernel source (compiled to shaders.metallib if Xcode present)
 ├── irs/
 │   ├── mnist/          # MNIST 2-layer MLP IR + pretrained weights
 │   └── two_dimensional/# Toy IR examples

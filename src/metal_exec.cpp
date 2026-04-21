@@ -4,274 +4,17 @@
 #include <Foundation/Foundation.hpp>
 
 #include "../include/metal_exec.h"
+#include "../include/autotuner.h"
 
 #include <unordered_map>
 #include <stdexcept>
 #include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <iostream>
-
-// ── MSL shader source ────────────────────────────────────────────────────────
-static const char* SHADER_SRC = R"msl(
-#include <metal_stdlib>
-using namespace metal;
-
-// ─── Forward ─────────────────────────────────────────────────────────────────
-
-kernel void matmul(
-    device const float* A [[buffer(0)]],
-    device const float* B [[buffer(1)]],
-    device float*       C [[buffer(2)]],
-    constant uint& M      [[buffer(3)]],
-    constant uint& N      [[buffer(4)]],
-    constant uint& K      [[buffer(5)]],
-    uint2 gid [[thread_position_in_grid]])
-{
-    if (gid.x >= N || gid.y >= M) return;
-    float sum = 0.0f;
-    for (uint k = 0; k < K; k++)
-        sum += A[gid.y * K + k] * B[k * N + gid.x];
-    C[gid.y * N + gid.x] = sum;
-}
-
-kernel void matmul_relu(
-    device const float* A [[buffer(0)]],
-    device const float* B [[buffer(1)]],
-    device float*       C [[buffer(2)]],
-    constant uint& M      [[buffer(3)]],
-    constant uint& N      [[buffer(4)]],
-    constant uint& K      [[buffer(5)]],
-    uint2 gid [[thread_position_in_grid]])
-{
-    if (gid.x >= N || gid.y >= M) return;
-    float sum = 0.0f;
-    for (uint k = 0; k < K; k++)
-        sum += A[gid.y * K + k] * B[k * N + gid.x];
-    C[gid.y * N + gid.x] = sum > 0.0f ? sum : 0.0f;
-}
-
-kernel void relu(
-    device const float* inp [[buffer(0)]],
-    device float*       out [[buffer(1)]],
-    uint gid [[thread_position_in_grid]])
-{
-    out[gid] = inp[gid] > 0.0f ? inp[gid] : 0.0f;
-}
-
-// One thread per batch row — numerically stable
-kernel void softmax(
-    device const float* inp    [[buffer(0)]],
-    device float*       out    [[buffer(1)]],
-    constant uint& batch       [[buffer(2)]],
-    constant uint& classes     [[buffer(3)]],
-    uint gid [[thread_position_in_grid]])
-{
-    if (gid >= batch) return;
-    uint b = gid;
-    float maxv = inp[b * classes];
-    for (uint c = 1; c < classes; c++)
-        maxv = max(maxv, inp[b * classes + c]);
-    float sum = 0.0f;
-    for (uint c = 0; c < classes; c++)
-        sum += exp(inp[b * classes + c] - maxv);
-    for (uint c = 0; c < classes; c++)
-        out[b * classes + c] = exp(inp[b * classes + c] - maxv) / sum;
-}
-
-// Single-thread reduction (small batch/classes in practice)
-kernel void cross_entropy(
-    device float*       output       [[buffer(0)]],
-    device const float* input        [[buffer(1)]],
-    device const float* ground_truth [[buffer(2)]],
-    constant uint& batch             [[buffer(3)]],
-    constant uint& classes           [[buffer(4)]],
-    uint gid [[thread_position_in_grid]])
-{
-    if (gid > 0) return;
-    float total = 0.0f;
-    for (uint b = 0; b < batch; b++) {
-        float sample = 0.0f;
-        for (uint c = 0; c < classes; c++) {
-            float pred = input[b * classes + c] + 1e-8f;
-            sample += ground_truth[b * classes + c] * log(pred);
-        }
-        total -= sample;
-    }
-    output[0] = total / float(batch);
-}
-
-kernel void mse(
-    device float*       output       [[buffer(0)]],
-    device const float* input        [[buffer(1)]],
-    device const float* ground_truth [[buffer(2)]],
-    constant uint& size              [[buffer(3)]],
-    uint gid [[thread_position_in_grid]])
-{
-    if (gid > 0) return;
-    float sum = 0.0f;
-    for (uint i = 0; i < size; i++) {
-        float diff = input[i] - ground_truth[i];
-        sum += diff * diff;
-    }
-    output[0] = sum / float(size);
-}
-
-// ─── Backward ────────────────────────────────────────────────────────────────
-
-kernel void relu_backward(
-    device float*       input_grad  [[buffer(0)]],
-    device const float* output_grad [[buffer(1)]],
-    device const float* output      [[buffer(2)]],
-    uint gid [[thread_position_in_grid]])
-{
-    input_grad[gid] += output_grad[gid] * (output[gid] > 0.0f ? 1.0f : 0.0f);
-}
-
-// grad_lhs[i,k] += sum_j  output_grad[i,j] * rhs[k,j]
-// dispatch (K, M): gid.x = k, gid.y = i
-kernel void matmul_backward_lhs(
-    device float*       lhs_grad    [[buffer(0)]],
-    device const float* output_grad [[buffer(1)]],
-    device const float* rhs         [[buffer(2)]],
-    constant uint& M                [[buffer(3)]],
-    constant uint& K                [[buffer(4)]],
-    constant uint& N                [[buffer(5)]],
-    uint2 gid [[thread_position_in_grid]])
-{
-    if (gid.x >= K || gid.y >= M) return;
-    float sum = 0.0f;
-    for (uint j = 0; j < N; j++)
-        sum += output_grad[gid.y * N + j] * rhs[gid.x * N + j];
-    lhs_grad[gid.y * K + gid.x] += sum;
-}
-
-// grad_rhs[k,j] += sum_i  lhs[i,k] * output_grad[i,j]
-// dispatch (N, K): gid.x = j, gid.y = k
-kernel void matmul_backward_rhs(
-    device float*       rhs_grad    [[buffer(0)]],
-    device const float* lhs         [[buffer(1)]],
-    device const float* output_grad [[buffer(2)]],
-    constant uint& M                [[buffer(3)]],
-    constant uint& K                [[buffer(4)]],
-    constant uint& N                [[buffer(5)]],
-    uint2 gid [[thread_position_in_grid]])
-{
-    if (gid.x >= N || gid.y >= K) return;
-    float sum = 0.0f;
-    for (uint i = 0; i < M; i++)
-        sum += lhs[i * K + gid.y] * output_grad[i * N + gid.x];
-    rhs_grad[gid.y * N + gid.x] += sum;
-}
-
-// Same as matmul_backward_lhs but weighted by relu mask from fused output
-kernel void matmul_relu_backward_lhs(
-    device float*       lhs_grad    [[buffer(0)]],
-    device const float* output_grad [[buffer(1)]],
-    device const float* rhs         [[buffer(2)]],
-    device const float* output      [[buffer(3)]],
-    constant uint& M                [[buffer(4)]],
-    constant uint& K                [[buffer(5)]],
-    constant uint& N                [[buffer(6)]],
-    uint2 gid [[thread_position_in_grid]])
-{
-    if (gid.x >= K || gid.y >= M) return;
-    float sum = 0.0f;
-    for (uint j = 0; j < N; j++) {
-        float mask = output[gid.y * N + j] > 0.0f ? 1.0f : 0.0f;
-        sum += output_grad[gid.y * N + j] * mask * rhs[gid.x * N + j];
-    }
-    lhs_grad[gid.y * K + gid.x] += sum;
-}
-
-kernel void matmul_relu_backward_rhs(
-    device float*       rhs_grad    [[buffer(0)]],
-    device const float* lhs         [[buffer(1)]],
-    device const float* output_grad [[buffer(2)]],
-    device const float* output      [[buffer(3)]],
-    constant uint& M                [[buffer(4)]],
-    constant uint& K                [[buffer(5)]],
-    constant uint& N                [[buffer(6)]],
-    uint2 gid [[thread_position_in_grid]])
-{
-    if (gid.x >= N || gid.y >= K) return;
-    float sum = 0.0f;
-    for (uint i = 0; i < M; i++) {
-        float mask = output[i * N + gid.x] > 0.0f ? 1.0f : 0.0f;
-        sum += lhs[i * K + gid.y] * output_grad[i * N + gid.x] * mask;
-    }
-    rhs_grad[gid.y * N + gid.x] += sum;
-}
-
-// One thread per batch row — Jacobian-vector product
-kernel void softmax_backward(
-    device float*       input_grad  [[buffer(0)]],
-    device const float* output_grad [[buffer(1)]],
-    device const float* output      [[buffer(2)]],
-    constant uint& batch            [[buffer(3)]],
-    constant uint& classes          [[buffer(4)]],
-    uint gid [[thread_position_in_grid]])
-{
-    if (gid >= batch) return;
-    uint b = gid;
-    float dot = 0.0f;
-    for (uint c = 0; c < classes; c++)
-        dot += output_grad[b * classes + c] * output[b * classes + c];
-    for (uint c = 0; c < classes; c++) {
-        float s = output[b * classes + c];
-        float g = output_grad[b * classes + c];
-        input_grad[b * classes + c] += s * (g - dot);
-    }
-}
-
-// One thread per element
-kernel void cross_entropy_backward(
-    device float*       input_grad   [[buffer(0)]],
-    device const float* output_grad  [[buffer(1)]],
-    device const float* input        [[buffer(2)]],
-    device const float* ground_truth [[buffer(3)]],
-    constant uint& batch             [[buffer(4)]],
-    constant uint& classes           [[buffer(5)]],
-    uint gid [[thread_position_in_grid]])
-{
-    if (gid >= batch * classes) return;
-    float pred = input[gid] + 1e-8f;
-    float grad = (-ground_truth[gid] / pred) * output_grad[0] / float(batch);
-    input_grad[gid] += grad;
-}
-
-kernel void mse_backward(
-    device float*       input_grad   [[buffer(0)]],
-    device const float* output_grad  [[buffer(1)]],
-    device const float* input        [[buffer(2)]],
-    device const float* ground_truth [[buffer(3)]],
-    constant uint& size              [[buffer(4)]],
-    uint gid [[thread_position_in_grid]])
-{
-    if (gid >= size) return;
-    input_grad[gid] += (2.0f * (input[gid] - ground_truth[gid]) / float(size)) * output_grad[0];
-}
-
-// ─── Utility ──────────────────────────────────────────────────────────────────
-
-kernel void sgd_update(
-    device float*       storage [[buffer(0)]],
-    device const float* grad    [[buffer(1)]],
-    constant float& lr          [[buffer(2)]],
-    uint gid [[thread_position_in_grid]])
-{
-    storage[gid] -= lr * grad[gid];
-}
-
-kernel void zero_buffer(
-    device float* buf [[buffer(0)]],
-    uint gid [[thread_position_in_grid]])
-{
-    buf[gid] = 0.0f;
-}
-)msl";
-
-// ── Context ───────────────────────────────────────────────────────────────────
+#include <sstream>
 
 struct MetalContext {
     MTL::Device*    device = nullptr;
@@ -298,7 +41,6 @@ struct MetalContext {
 
 static MetalContext* g_ctx = nullptr;
 
-// float* (contents ptr) → MTL::Buffer*
 static std::unordered_map<float*, MTL::Buffer*> g_bufferMap;
 
 static MTL::ComputePipelineState* makePSO(MTL::Device* dev, MTL::Library* lib, const char* name) {
@@ -327,13 +69,29 @@ static MetalContext& getCtx() {
 
     g_ctx->queue = g_ctx->device->newCommandQueue();
 
-    NS::String* src = NS::String::string(SHADER_SRC, NS::UTF8StringEncoding);
-    NS::Error* err  = nullptr;
-    g_ctx->lib = g_ctx->device->newLibrary(src, nullptr, &err);
-    if (!g_ctx->lib) {
+    NS::Error* err = nullptr;
+#ifdef METALLIB_PATH
+    // Xcode available: load the pre-compiled binary (fast, errors caught at build time)
+    NS::String* path = NS::String::string(METALLIB_PATH, NS::UTF8StringEncoding);
+    NS::URL*    url  = NS::URL::fileURLWithPath(path);
+    g_ctx->lib = g_ctx->device->newLibrary(url, &err);
+    if (!g_ctx->lib)
+        throw std::runtime_error(std::string("Metal: failed to load shaders.metallib: ") +
+                                 err->localizedDescription()->utf8String());
+#else
+    // Command Line Tools only: read shaders.metal and compile at runtime
+    std::ifstream file(SHADER_SRC_PATH);
+    if (!file.is_open())
+        throw std::runtime_error(std::string("Metal: cannot open shader source: ") + SHADER_SRC_PATH);
+    std::ostringstream ss;
+    ss << file.rdbuf();
+    std::string src = ss.str();
+    NS::String* srcStr = NS::String::string(src.c_str(), NS::UTF8StringEncoding);
+    g_ctx->lib = g_ctx->device->newLibrary(srcStr, nullptr, &err);
+    if (!g_ctx->lib)
         throw std::runtime_error(std::string("Metal: shader compile failed: ") +
                                  err->localizedDescription()->utf8String());
-    }
+#endif
 
     g_ctx->matmulPSO               = makePSO(g_ctx->device, g_ctx->lib, "matmul");
     g_ctx->matmulReluPSO           = makePSO(g_ctx->device, g_ctx->lib, "matmul_relu");
@@ -354,8 +112,6 @@ static MetalContext& getCtx() {
 
     return *g_ctx;
 }
-
-// ── Internal helpers ──────────────────────────────────────────────────────────
 
 static MTL::Buffer* getBuf(float* ptr) {
     auto it = g_bufferMap.find(ptr);
@@ -393,8 +149,6 @@ static void dispatch2D(MTL::ComputePipelineState* pso,
     dispatch(pso, setup, MTL::Size(w, h, 1), MTL::Size(tw, th, 1));
 }
 
-// ── Memory ────────────────────────────────────────────────────────────────────
-
 void metalMalloc(float** ptr, size_t bytes) {
     auto& ctx = getCtx();
     MTL::Buffer* buf = ctx.device->newBuffer(bytes, MTL::ResourceStorageModeShared);
@@ -427,20 +181,62 @@ void metalZeroDevice(float* ptr, int size) {
     }, size);
 }
 
-// ── Forward ───────────────────────────────────────────────────────────────────
+// Runs matmul_tiled_N for the given tile size and returns wall-clock seconds.
+// This is the Metal implementation of BenchmarkFn passed to autotune().
+static double metalBenchmarkTile(float* A, float* B, float* C,
+                                  int M, int N, int K, int tile) {
+    std::string name = "matmul_tiled_" + std::to_string(tile);
+    MTL::ComputePipelineState* pso = makePSO(getCtx().device, getCtx().lib, name.c_str());
 
-void metalMatmulDevice(float* C, float* A, float* B, int M, int N, int K) {
-    auto& ctx = getCtx();
     uint uM = M, uN = N, uK = K;
-    // dispatch (N, M): gid.x = col, gid.y = row
-    dispatch2D(ctx.matmulPSO, [&](MTL::ComputeCommandEncoder* enc) {
+    uint gridW = ((uint)N + tile - 1) / tile * tile;
+    uint gridH = ((uint)M + tile - 1) / tile * tile;
+
+    auto run = [&]() {
+        auto& ctx = getCtx();
+        auto t0 = std::chrono::high_resolution_clock::now();
+        MTL::CommandBuffer*         cmd = ctx.queue->commandBuffer();
+        MTL::ComputeCommandEncoder* enc = cmd->computeCommandEncoder();
+        enc->setComputePipelineState(pso);
         enc->setBuffer(getBuf(A), 0, 0);
         enc->setBuffer(getBuf(B), 0, 1);
         enc->setBuffer(getBuf(C), 0, 2);
         enc->setBytes(&uM, sizeof(uint), 3);
         enc->setBytes(&uN, sizeof(uint), 4);
         enc->setBytes(&uK, sizeof(uint), 5);
-    }, N, M);
+        enc->dispatchThreads(MTL::Size(gridW, gridH, 1), MTL::Size(tile, tile, 1));
+        enc->endEncoding();
+        cmd->commit();
+        cmd->waitUntilCompleted();
+        auto t1 = std::chrono::high_resolution_clock::now();
+        return std::chrono::duration<double>(t1 - t0).count();
+    };
+
+    run();          // warmup — first dispatch includes driver overhead
+    double t = run();
+    pso->release();
+    return t;
+}
+
+void metalMatmulDevice(float* C, float* A, float* B, int M, int N, int K) {
+    int tile = 0;
+    if (!lookupTile(M, N, K, tile))
+        tile = autotune(A, B, C, M, N, K, metalBenchmarkTile).bestTile;
+
+    std::string name = "matmul_tiled_" + std::to_string(tile);
+    MTL::ComputePipelineState* pso = makePSO(getCtx().device, getCtx().lib, name.c_str());
+    uint uM = M, uN = N, uK = K;
+    uint gridW = ((uint)N + tile - 1) / tile * tile;
+    uint gridH = ((uint)M + tile - 1) / tile * tile;
+    dispatch(pso, [&](MTL::ComputeCommandEncoder* enc) {
+        enc->setBuffer(getBuf(A), 0, 0);
+        enc->setBuffer(getBuf(B), 0, 1);
+        enc->setBuffer(getBuf(C), 0, 2);
+        enc->setBytes(&uM, sizeof(uint), 3);
+        enc->setBytes(&uN, sizeof(uint), 4);
+        enc->setBytes(&uK, sizeof(uint), 5);
+    }, MTL::Size(gridW, gridH, 1), MTL::Size(tile, tile, 1));
+    pso->release();
 }
 
 void metalReluDevice(float* output, float* input, int size) {
@@ -499,8 +295,6 @@ void metalMseDevice(float* output, float* input, float* ground_truth, int size) 
         enc->setBytes(&us, sizeof(uint), 3);
     }, 1);
 }
-
-// ── Backward ──────────────────────────────────────────────────────────────────
 
 void metalReluBackwardDevice(float* input_grad, float* output_grad, float* output, int size) {
     auto& ctx = getCtx();
@@ -603,8 +397,6 @@ void metalMseBackwardDevice(float* input_grad, float* output_grad,
         enc->setBytes(&us, sizeof(uint), 4);
     }, size);
 }
-
-// ── Training ──────────────────────────────────────────────────────────────────
 
 void metalSgdUpdateDevice(float* storage, float* grad, float lr, int size) {
     auto& ctx = getCtx();
