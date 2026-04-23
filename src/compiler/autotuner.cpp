@@ -1,4 +1,4 @@
-#include "../include/autotuner.h"
+#include "compiler/autotuner.h"
 #include <iostream>
 
 static const int CANDIDATES[] = {8, 16, 32};

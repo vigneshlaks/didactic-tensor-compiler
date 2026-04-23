@@ -1,7 +1,7 @@
 #include <iostream>
 #include <algorithm>
-#include "../include/optimizers.h"
-#include "../include/ops.h"
+#include "compiler/optimizers.h"
+#include "core/ops.h"
 
 // everything related to parameters
 // might have to change params for other inputs

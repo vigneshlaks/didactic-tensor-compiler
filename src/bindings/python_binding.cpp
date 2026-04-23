@@ -4,10 +4,10 @@
 #include <nlohmann/json.hpp>
 #include <iostream>
 
-#include "../include/frontend.h"
-#include "../include/passes.h"
-#include "../include/optimizers.h"
-#include "../include/mnist.h"
+#include "compiler/frontend.h"
+#include "compiler/passes.h"
+#include "compiler/optimizers.h"
+#include "examples/mnist.h"
 
 namespace nb = nanobind;
 using json = nlohmann::json;

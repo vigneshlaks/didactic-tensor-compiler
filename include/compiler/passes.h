@@ -3,9 +3,9 @@
 #define PASSES_H
 
 #include <vector>
-#include "frontend.h"
-#include "ops.h"
-#include "types.h"
+#include "compiler/frontend.h"
+#include "core/ops.h"
+#include "core/types.h"
 
 class Pass {
 public:

@@ -1,13 +1,13 @@
-#include "../include/types.h"
+#include "core/types.h"
 #include <iostream>
 #include <algorithm>
 
 #ifdef CUDA_FOUND
-#include "../include/gpu_exec.h"
+#include "backend/gpu_exec.h"
 #endif
 
 #ifdef METAL_FOUND
-#include "../include/metal_exec.h"
+#include "backend/metal_exec.h"
 #endif
 
 Tensor::~Tensor() {

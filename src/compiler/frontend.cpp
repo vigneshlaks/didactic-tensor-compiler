@@ -1,6 +1,6 @@
 
-#include "../include/frontend.h"
-#include "../include/passes.h"
+#include "compiler/frontend.h"
+#include "compiler/passes.h"
 #include <map>
 #include <iostream>
 #include <fstream>

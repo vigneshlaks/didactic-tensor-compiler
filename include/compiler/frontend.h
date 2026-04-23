@@ -1,8 +1,8 @@
 #ifndef HLO_H
 #define HLO_H
 
-#include "ops.h"
-#include "types.h"
+#include "core/ops.h"
+#include "core/types.h"
 
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;

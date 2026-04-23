@@ -157,7 +157,3 @@ didactic-tensor-compiler/
 ├── data/MNIST/         # MNIST binary dataset
 └── CMakeLists.txt
 ```
-
-## Next Steps
-- GPU Autotuning
-- Some systems jazz

@@ -1,7 +1,7 @@
 #ifndef OPTIMIZERS_H
 #define OPTIMIZERS_H
 
-#include "frontend.h"
+#include "compiler/frontend.h"
 #include <vector>
 #include <cmath>
 #include <unordered_map>

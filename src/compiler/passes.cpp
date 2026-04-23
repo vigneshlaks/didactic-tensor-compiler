@@ -1,4 +1,4 @@
-#include "../include/passes.h"
+#include "compiler/passes.h"
 #include <iostream>
 #include <algorithm>
 

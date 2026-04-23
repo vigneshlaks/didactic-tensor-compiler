@@ -1,14 +1,11 @@
-#include "../include/ops.h"
+#include "core/ops.h"
 
-// compile flag to state if we have a GPU
-// not included in compilation if CUDA is not recognized
-// used in other places as well
 #ifdef CUDA_FOUND
-#include "../include/gpu_exec.h"
+#include "backend/gpu_exec.h"
 #endif
 
 #ifdef METAL_FOUND
-#include "../include/metal_exec.h"
+#include "backend/metal_exec.h"
 #endif
 
 #include <iostream>

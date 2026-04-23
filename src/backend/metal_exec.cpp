@@ -3,8 +3,8 @@
 #include <Metal/Metal.hpp>
 #include <Foundation/Foundation.hpp>
 
-#include "../include/metal_exec.h"
-#include "../include/autotuner.h"
+#include "backend/metal_exec.h"
+#include "compiler/autotuner.h"
 
 #include <unordered_map>
 #include <stdexcept>
