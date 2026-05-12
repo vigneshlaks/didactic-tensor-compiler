@@ -1,6 +1,6 @@
-# Neural-Network-Compiler
+# Lite-IR
 
-Neural Network Compiler is an educational resource and reference implementation for understanding tensor compiler optimization. While materials exist on backpropagation and computing gradients, fewer resources explain the compilation and optimization processes that make tensor operations efficient on modern hardware. This project bridges that gap by providing a minimal, extensible codebase demonstrating their implementation.
+Lite-IR is an educational resource and reference implementation for understanding tensor compiler optimization. While materials exist on backpropagation and computing gradients, fewer resources explain the compilation and optimization processes that make tensor operations efficient on modern hardware. This project bridges that gap by providing a minimal, extensible codebase demonstrating their implementation.
 
 ## Architecture
 
@@ -151,26 +151,15 @@ neural-network-compiler/
 
 The following are natural extensions, roughly ordered by difficulty.
 
-**New ops**
-- `conv2d` — the step from MNIST to real vision models; requires im2col or a direct kernel
-- `layer_norm` / `attention` — gets the IR to transformer-level networks
-- `dropout` — training-only op that requires a forward/backward mode distinction in the graph
+### Compiler
+- Traditional compiler passes (constant folding, dead code elimination)
+- Memory planning with another low level internal representation
+- Advanced GPU autotuning techniques
 
-**New passes**
-- `ConstantFoldingPass` — evaluate const→const subgraphs at compile time
-- `DeadCodeEliminationPass` — prune nodes whose outputs are never consumed
-- `MemoryPlanningPass` — assign shared buffer slots to activations so allocations are not per-node
+### Kernels
+- Tiled and blocked matmul to improve cache utilization
+- Triton kernel integration as an alternative backend target
 
-**Backend improvements**
-- Tiled CUDA matmul with shared memory — the current unoptimized kernel is one thread per output element
-- Call vendor routines when available and fall back to the hand-written kernel otherwise
-- Fuse more patterns
-
-**Training**
-- Adam optimizer (`optimizers.h` / `optimizers.cpp`) — SGD with momentum and adaptive learning rates
-- Gradient clipping — prevents exploding gradients without changing the optimizer interface
-- Symbolic autograd — derive gradients from the graph structure instead of hardcoding them per op
-
-**IR / infrastructure**
-- Dynamic shapes — re-run `ShapeInferencePass` when input dimensions change rather than requiring static dims in the JSON
-- Multi-output nodes — the current `Node` holds a single output tensor; some ops produce multiple
+### Misc
+- Adam and SGD with momentum as alternatives to vanilla SGD
+- Conv2d, layer norm, attention, and dropout op implementations
